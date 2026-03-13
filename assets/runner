@@ -1,0 +1,327 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+share_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+container_name="github-actions-runner"
+config_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/ublue-github-runner"
+config_file="${config_dir}/runner.env"
+
+die() {
+  echo "$*" >&2
+  exit 1
+}
+
+load_env() {
+  if [[ -f "${config_file}" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "${config_file}"
+    set +a
+  fi
+}
+
+set_defaults() {
+  export RUNNER_HOME="${RUNNER_HOME:-${HOME}/.local/share/github-actions-runner}"
+  export RUNNER_INSTALL_DIR="${RUNNER_INSTALL_DIR:-${RUNNER_HOME}/actions-runner}"
+  export RUNNER_WORKDIR="${RUNNER_WORKDIR:-${RUNNER_HOME}/work}"
+  export RUNNER_TOOLCACHE_DIR="${RUNNER_TOOLCACHE_DIR:-${RUNNER_HOME}/toolcache}"
+  export RUNNER_NAME="${RUNNER_NAME:-github-runner-$(hostname -s)}"
+  export RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,linux,x64}"
+  export REPO_URL="${REPO_URL:-}"
+
+  if [[ -n "${GITHUB_REPOSITORY:-}" && -z "${REPO_URL}" ]]; then
+    export REPO_URL="https://github.com/${GITHUB_REPOSITORY}"
+  fi
+}
+
+require_repo_config() {
+  [[ -n "${GITHUB_REPOSITORY:-}" ]] || die "GITHUB_REPOSITORY is required"
+  [[ "${GITHUB_REPOSITORY}" == */* ]] || die "GITHUB_REPOSITORY must be in owner/repo format"
+}
+
+require_docker() {
+  command -v docker >/dev/null || die "docker is required"
+  docker version >/dev/null
+  docker compose version >/dev/null
+}
+
+require_gh() {
+  command -v gh >/dev/null || die "gh is required"
+  gh auth status >/dev/null
+}
+
+compose() {
+  docker compose \
+    --file "${share_dir}/compose.yaml" \
+    --project-directory "${share_dir}" \
+    "$@"
+}
+
+ensure_dirs() {
+  mkdir -p \
+    "${RUNNER_INSTALL_DIR}" \
+    "${RUNNER_WORKDIR}" \
+    "${RUNNER_TOOLCACHE_DIR}"
+}
+
+container_exists() {
+  docker container inspect "${container_name}" >/dev/null 2>&1
+}
+
+container_running() {
+  [[ "$(docker inspect -f '{{.State.Running}}' "${container_name}" 2>/dev/null || true)" == "true" ]]
+}
+
+registration_token() {
+  gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runners/registration-token" --jq .token
+}
+
+runner_id() {
+  gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runners" \
+    --jq '.runners[] | select(.name == env.RUNNER_NAME) | .id' \
+    | head -n 1
+}
+
+show_github_status() {
+  local runner_status
+
+  runner_status="$(
+    gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runners" \
+      --jq '.runners[] | select(.name == env.RUNNER_NAME) | {name: .name, status: .status, busy: .busy, labels: [.labels[].name]}' \
+      || true
+  )"
+
+  if [[ -n "${runner_status}" ]]; then
+    echo "${runner_status}"
+  else
+    echo "Runner ${RUNNER_NAME} is not registered in ${GITHUB_REPOSITORY}"
+  fi
+}
+
+unregister_runner() {
+  local id
+
+  id="$(runner_id)"
+  if [[ -z "${id}" ]]; then
+    echo "Runner ${RUNNER_NAME} is not registered in ${GITHUB_REPOSITORY}"
+    return 0
+  fi
+
+  gh api -X DELETE "repos/${GITHUB_REPOSITORY}/actions/runners/${id}" >/dev/null
+  echo "Unregistered ${RUNNER_NAME} from ${GITHUB_REPOSITORY}"
+}
+
+usage() {
+  cat <<'EOF'
+Usage: ublue-github-runner <prompt|help|configure|doctor|install|remove|status|logs>
+EOF
+}
+
+prompt() {
+  local action
+
+  if command -v gum >/dev/null 2>&1; then
+    action="$(gum choose configure install remove status logs doctor help)"
+  elif command -v fzf >/dev/null 2>&1; then
+    action="$(printf '%s\n' configure install remove status logs doctor help | fzf --prompt='setup-github-runner > ')"
+  else
+    help
+    return 0
+  fi
+
+  [[ -n "${action}" ]] || return 0
+  main "${action}"
+}
+
+help() {
+  cat <<'EOF'
+setup-github-runner actions:
+  configure Prompt for repo and runner settings, then save them locally
+  install   Build and start the repo-scoped runner
+  remove    Stop the runner and unregister it from GitHub
+  status    Show container and GitHub runner status
+  logs      Follow runner logs
+  doctor    Verify Docker and GitHub CLI prerequisites
+EOF
+}
+
+prompt_value() {
+  local prompt_label="$1"
+  local current_value="$2"
+  local placeholder="$3"
+  local value
+
+  if command -v gum >/dev/null 2>&1; then
+    value="$(gum input --prompt "${prompt_label}: " --value "${current_value}" --placeholder "${placeholder}")"
+  else
+    read -r -p "${prompt_label} [${current_value}]: " value
+  fi
+
+  if [[ -n "${value}" ]]; then
+    printf '%s\n' "${value}"
+  else
+    printf '%s\n' "${current_value}"
+  fi
+}
+
+configure() {
+  local repository
+  local runner_name
+  local runner_labels
+  local runner_home
+
+  load_env
+  set_defaults
+
+  mkdir -p "${config_dir}"
+
+  repository="$(prompt_value "GitHub repository" "${GITHUB_REPOSITORY:-owner/repo}" "owner/repo")"
+  [[ "${repository}" == */* ]] || die "GITHUB_REPOSITORY must be in owner/repo format"
+
+  runner_name="$(prompt_value "Runner name" "${RUNNER_NAME}" "github-runner-$(hostname -s)")"
+  runner_labels="$(prompt_value "Runner labels" "${RUNNER_LABELS}" "self-hosted,linux,x64")"
+  runner_home="$(prompt_value "Runner home" "${RUNNER_HOME}" "${HOME}/.local/share/github-actions-runner")"
+
+  cat > "${config_file}" <<EOF
+# User configuration for the local GitHub Actions runner.
+GITHUB_REPOSITORY=${repository}
+RUNNER_NAME=${runner_name}
+RUNNER_LABELS=${runner_labels}
+RUNNER_HOME=${runner_home}
+EOF
+
+  echo "Saved runner configuration to ${config_file}"
+}
+
+doctor() {
+  load_env
+  set_defaults
+  require_repo_config
+  require_docker
+  require_gh
+  ensure_dirs
+
+  echo "docker, docker compose, and gh are available"
+  echo "Runner home: ${RUNNER_HOME}"
+  echo "Repository: ${GITHUB_REPOSITORY}"
+  echo "Config file: ${config_file}"
+  echo "Share directory: ${share_dir}"
+}
+
+install() {
+  load_env
+  set_defaults
+  require_repo_config
+  require_docker
+  require_gh
+  ensure_dirs
+
+  if container_exists; then
+    if container_running; then
+      echo "Runner container is already running"
+    else
+      docker start "${container_name}" >/dev/null
+      echo "Started ${container_name}"
+    fi
+
+    status
+    return
+  fi
+
+  export RUNNER_TOKEN
+  RUNNER_TOKEN="$(registration_token)"
+
+  compose up --detach --build
+  status
+}
+
+remove() {
+  local gh_ready=0
+
+  load_env
+  set_defaults
+  require_docker
+
+  if [[ -n "${GITHUB_REPOSITORY:-}" ]] \
+    && [[ "${GITHUB_REPOSITORY}" == */* ]] \
+    && command -v gh >/dev/null \
+    && gh auth status >/dev/null 2>&1; then
+    gh_ready=1
+  fi
+
+  if (( gh_ready )); then
+    unregister_runner
+  else
+    echo "Skipping GitHub unregister; run configure and authenticate gh to remove the runner registration." >&2
+  fi
+
+  if container_exists; then
+    compose down
+  else
+    echo "Runner container is not present"
+  fi
+}
+
+status() {
+  local gh_ready=0
+
+  load_env
+  set_defaults
+  require_docker
+  compose ps
+
+  if [[ -n "${GITHUB_REPOSITORY:-}" ]] \
+    && [[ "${GITHUB_REPOSITORY}" == */* ]] \
+    && command -v gh >/dev/null \
+    && gh auth status >/dev/null 2>&1; then
+    gh_ready=1
+  fi
+
+  if (( gh_ready )); then
+    show_github_status
+  else
+    echo "GitHub status unavailable; run configure and authenticate gh to query the runner." >&2
+  fi
+}
+
+logs() {
+  load_env
+  set_defaults
+  require_docker
+  compose logs --follow runner
+}
+
+main() {
+  case "${1:-}" in
+    prompt|"")
+      prompt
+      ;;
+    help)
+      help
+      ;;
+    configure)
+      configure
+      ;;
+    doctor)
+      doctor
+      ;;
+    install|up)
+      install
+      ;;
+    remove|down)
+      remove
+      ;;
+    status)
+      status
+      ;;
+    logs)
+      logs
+      ;;
+    *)
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

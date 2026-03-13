@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+data_home="${XDG_DATA_HOME:-${HOME}/.local/share}"
+config_home="${XDG_CONFIG_HOME:-${HOME}/.config}"
+bin_dir="${INSTALL_BIN_DIR:-${HOME}/.local/bin}"
+data_dir="${data_home}/ublue-github-runner"
+config_dir="${config_home}/ublue-github-runner"
+wrapper_path="${bin_dir}/ujust"
+wrapper_marker="# managed by ublue-github-runner"
+
+if [[ -f "${wrapper_path}" ]] && grep -qF "${wrapper_marker}" "${wrapper_path}"; then
+  rm -f "${wrapper_path}"
+fi
+
+rm -rf "${data_dir}" "${config_dir}"
+
+echo "Removed user-space ujust extension from ${HOME}"

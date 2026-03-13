@@ -1,0 +1,27 @@
+services:
+  runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.runner
+    container_name: github-actions-runner
+    restart: unless-stopped
+    user: root
+    environment:
+      ACTIONS_RUNNER_DIR: ${RUNNER_INSTALL_DIR}
+      IMAGE_ACTIONS_RUNNER_DIR: /opt/actions-runner-image
+      AGENT_TOOLSDIRECTORY: ${RUNNER_TOOLCACHE_DIR}
+      RUN_AS_ROOT: "true"
+      RUNNER_SCOPE: repo
+      REPO_URL: ${REPO_URL}
+      RUNNER_NAME: ${RUNNER_NAME}
+      LABELS: ${RUNNER_LABELS}
+      RUNNER_WORKDIR: ${RUNNER_WORKDIR}
+      DISABLE_AUTOMATIC_DEREGISTRATION: "true"
+      DISABLE_AUTO_UPDATE: "1"
+      UNSET_CONFIG_VARS: "true"
+      RUNNER_TOKEN: ${RUNNER_TOKEN:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${RUNNER_INSTALL_DIR}:${RUNNER_INSTALL_DIR}
+      - ${RUNNER_WORKDIR}:${RUNNER_WORKDIR}
+      - ${RUNNER_TOOLCACHE_DIR}:${RUNNER_TOOLCACHE_DIR}
