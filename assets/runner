@@ -2,7 +2,6 @@
 set -euo pipefail
 
 share_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-container_name="github-actions-runner"
 config_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/ublue-github-runner"
 config_file="${config_dir}/runner.env"
 
@@ -11,16 +10,48 @@ die() {
   exit 1
 }
 
+config_line() {
+  local key="$1"
+  local value="$2"
+  printf '%s=%q\n' "${key}" "${value}"
+}
+
+repo_slug() {
+  if [[ -n "${GITHUB_REPOSITORY:-}" ]]; then
+    printf '%s\n' "${GITHUB_REPOSITORY,,}" | tr '/._' '-'
+  else
+    hostname -s
+  fi
+}
+
+trim_label() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s\n' "${value}"
+}
+
 load_env() {
+  local line
+  local key
+
   if [[ -f "${config_file}" ]]; then
-    set -a
-    # shellcheck disable=SC1090
-    source "${config_file}"
-    set +a
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] || continue
+      [[ "${line}" == \#* ]] && continue
+      key="${line%%=*}"
+      [[ -n "${key}" ]] || continue
+      if [[ -z "${!key+x}" ]]; then
+        # Values in runner.env are written with shell quoting via %q.
+        eval "export ${line}"
+      fi
+    done < "${config_file}"
   fi
 }
 
 set_defaults() {
+  local slug
+
   export RUNNER_HOME="${RUNNER_HOME:-${HOME}/.local/share/github-actions-runner}"
   export RUNNER_INSTALL_DIR="${RUNNER_INSTALL_DIR:-${RUNNER_HOME}/actions-runner}"
   export RUNNER_WORKDIR="${RUNNER_WORKDIR:-${RUNNER_HOME}/work}"
@@ -28,6 +59,9 @@ set_defaults() {
   export RUNNER_NAME="${RUNNER_NAME:-github-runner-$(hostname -s)}"
   export RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,linux,x64}"
   export REPO_URL="${REPO_URL:-}"
+  slug="$(repo_slug)"
+  export RUNNER_CONTAINER_NAME="${RUNNER_CONTAINER_NAME:-github-actions-runner-${slug}}"
+  export RUNNER_IMAGE_NAME="${RUNNER_IMAGE_NAME:-local/github-actions-runner:${slug}}"
 
   if [[ -n "${GITHUB_REPOSITORY:-}" && -z "${REPO_URL}" ]]; then
     export REPO_URL="https://github.com/${GITHUB_REPOSITORY}"
@@ -50,6 +84,10 @@ require_gh() {
   gh auth status >/dev/null
 }
 
+container_name() {
+  printf '%s\n' "${RUNNER_CONTAINER_NAME}"
+}
+
 compose() {
   docker compose \
     --file "${share_dir}/compose.yaml" \
@@ -65,11 +103,11 @@ ensure_dirs() {
 }
 
 container_exists() {
-  docker container inspect "${container_name}" >/dev/null 2>&1
+  docker container inspect "$(container_name)" >/dev/null 2>&1
 }
 
 container_running() {
-  [[ "$(docker inspect -f '{{.State.Running}}' "${container_name}" 2>/dev/null || true)" == "true" ]]
+  [[ "$(docker inspect -f '{{.State.Running}}' "$(container_name)" 2>/dev/null || true)" == "true" ]]
 }
 
 registration_token() {
@@ -98,6 +136,42 @@ show_github_status() {
   fi
 }
 
+render_effective_config() {
+  cat <<EOF
+Repository: ${GITHUB_REPOSITORY:-unset}
+Repo URL: ${REPO_URL:-unset}
+Runner name: ${RUNNER_NAME}
+Runner labels: ${RUNNER_LABELS}
+Runner home: ${RUNNER_HOME}
+Runner install dir: ${RUNNER_INSTALL_DIR}
+Runner workdir: ${RUNNER_WORKDIR}
+Runner toolcache dir: ${RUNNER_TOOLCACHE_DIR}
+Runner container name: ${RUNNER_CONTAINER_NAME}
+Runner image name: ${RUNNER_IMAGE_NAME}
+Config file: ${config_file}
+Share directory: ${share_dir}
+EOF
+}
+
+show_config() {
+  load_env
+  set_defaults
+  render_effective_config
+}
+
+save_config() {
+  mkdir -p "${config_dir}"
+  cat > "${config_file}" <<EOF
+# User configuration for the local GitHub Actions runner.
+$(config_line "GITHUB_REPOSITORY" "${GITHUB_REPOSITORY}")
+$(config_line "RUNNER_NAME" "${RUNNER_NAME}")
+$(config_line "RUNNER_LABELS" "${RUNNER_LABELS}")
+$(config_line "RUNNER_HOME" "${RUNNER_HOME}")
+$(config_line "RUNNER_CONTAINER_NAME" "${RUNNER_CONTAINER_NAME}")
+$(config_line "RUNNER_IMAGE_NAME" "${RUNNER_IMAGE_NAME}")
+EOF
+}
+
 unregister_runner() {
   local id
 
@@ -113,7 +187,7 @@ unregister_runner() {
 
 usage() {
   cat <<'EOF'
-Usage: ublue-github-runner <prompt|help|configure|doctor|install|remove|status|logs>
+Usage: ublue-github-runner <prompt|help|configure|configure-from-env|doctor|install|remove|status|logs|example|show-config>
 EOF
 }
 
@@ -121,9 +195,9 @@ prompt() {
   local action
 
   if command -v gum >/dev/null 2>&1; then
-    action="$(gum choose configure install remove status logs doctor help)"
+    action="$(gum choose configure configure-from-env install remove status logs doctor example show-config help)"
   elif command -v fzf >/dev/null 2>&1; then
-    action="$(printf '%s\n' configure install remove status logs doctor help | fzf --prompt='setup-github-runner > ')"
+    action="$(printf '%s\n' configure configure-from-env install remove status logs doctor example show-config help | fzf --prompt='setup-github-runner > ')"
   else
     help
     return 0
@@ -137,11 +211,14 @@ help() {
   cat <<'EOF'
 setup-github-runner actions:
   configure Prompt for repo and runner settings, then save them locally
+  configure-from-env Save configuration from current environment variables
   install   Build and start the repo-scoped runner
   remove    Stop the runner and unregister it from GitHub
-  status    Show container and GitHub runner status
+  status    Show local system, container, config, and GitHub runner status
   logs      Follow runner logs
-  doctor    Verify Docker and GitHub CLI prerequisites
+  doctor    Verify Docker, boot persistence, path, and GitHub access
+  example   Print a step-by-step example for the configured repository
+  show-config Print the resolved effective configuration
 EOF
 }
 
@@ -169,31 +246,50 @@ configure() {
   local runner_name
   local runner_labels
   local runner_home
+  local runner_container_name
+  local runner_image_name
 
   load_env
   set_defaults
 
-  mkdir -p "${config_dir}"
-
   repository="$(prompt_value "GitHub repository" "${GITHUB_REPOSITORY:-owner/repo}" "owner/repo")"
   [[ "${repository}" == */* ]] || die "GITHUB_REPOSITORY must be in owner/repo format"
+  export GITHUB_REPOSITORY="${repository}"
+  set_defaults
 
   runner_name="$(prompt_value "Runner name" "${RUNNER_NAME}" "github-runner-$(hostname -s)")"
   runner_labels="$(prompt_value "Runner labels" "${RUNNER_LABELS}" "self-hosted,linux,x64")"
   runner_home="$(prompt_value "Runner home" "${RUNNER_HOME}" "${HOME}/.local/share/github-actions-runner")"
+  export RUNNER_HOME="${runner_home}"
+  set_defaults
+  runner_container_name="$(prompt_value "Runner container name" "${RUNNER_CONTAINER_NAME}" "github-actions-runner-$(repo_slug)")"
+  runner_image_name="$(prompt_value "Runner image name" "${RUNNER_IMAGE_NAME}" "local/github-actions-runner:$(repo_slug)")"
 
-  cat > "${config_file}" <<EOF
-# User configuration for the local GitHub Actions runner.
-GITHUB_REPOSITORY=${repository}
-RUNNER_NAME=${runner_name}
-RUNNER_LABELS=${runner_labels}
-RUNNER_HOME=${runner_home}
-EOF
+  export RUNNER_NAME="${runner_name}"
+  export RUNNER_LABELS="${runner_labels}"
+  export RUNNER_HOME="${runner_home}"
+  export RUNNER_CONTAINER_NAME="${runner_container_name}"
+  export RUNNER_IMAGE_NAME="${runner_image_name}"
+  set_defaults
+  save_config
 
   echo "Saved runner configuration to ${config_file}"
+  render_effective_config
+}
+
+configure_from_env() {
+  load_env
+  require_repo_config
+  set_defaults
+  save_config
+  echo "Saved runner configuration to ${config_file}"
+  render_effective_config
 }
 
 doctor() {
+  local local_bin_dir="${HOME}/.local/bin"
+  local token_status="failed"
+
   load_env
   set_defaults
   require_repo_config
@@ -201,11 +297,27 @@ doctor() {
   require_gh
   ensure_dirs
 
-  echo "docker, docker compose, and gh are available"
-  echo "Runner home: ${RUNNER_HOME}"
-  echo "Repository: ${GITHUB_REPOSITORY}"
-  echo "Config file: ${config_file}"
-  echo "Share directory: ${share_dir}"
+  if registration_token >/dev/null 2>&1; then
+    token_status="ok"
+  fi
+
+  echo "doctor:"
+  echo "  docker cli: ok"
+  echo "  docker compose: ok"
+  echo "  gh auth: ok"
+  echo "  repo configuration: ok"
+  echo "  runner registration token: ${token_status}"
+  if command -v systemctl >/dev/null 2>&1; then
+    echo "  docker.service enabled: $(systemctl is-enabled docker.service 2>/dev/null || echo unknown)"
+    echo "  docker.service active: $(systemctl is-active docker.service 2>/dev/null || echo unknown)"
+  fi
+  if printf '%s\n' "${PATH}" | tr ':' '\n' | grep -Fx "${local_bin_dir}" >/dev/null; then
+    echo "  ~/.local/bin in PATH: yes"
+  else
+    echo "  ~/.local/bin in PATH: no"
+  fi
+  echo
+  render_effective_config
 }
 
 install() {
@@ -220,8 +332,8 @@ install() {
     if container_running; then
       echo "Runner container is already running"
     else
-      docker start "${container_name}" >/dev/null
-      echo "Started ${container_name}"
+      docker start "$(container_name)" >/dev/null
+      echo "Started $(container_name)"
     fi
 
     status
@@ -264,10 +376,33 @@ remove() {
 
 status() {
   local gh_ready=0
+  local container_restart="missing"
+  local container_state="missing"
+  local container_image="missing"
 
   load_env
   set_defaults
   require_docker
+
+  echo "local:"
+  if command -v systemctl >/dev/null 2>&1; then
+    echo "  docker.service enabled: $(systemctl is-enabled docker.service 2>/dev/null || echo unknown)"
+    echo "  docker.service active: $(systemctl is-active docker.service 2>/dev/null || echo unknown)"
+  fi
+  if container_exists; then
+    container_restart="$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$(container_name)")"
+    container_state="$(docker inspect -f '{{.State.Status}}' "$(container_name)")"
+    container_image="$(docker inspect -f '{{.Config.Image}}' "$(container_name)")"
+  fi
+  echo "  container name: $(container_name)"
+  echo "  container state: ${container_state}"
+  echo "  container restart policy: ${container_restart}"
+  echo "  container image: ${container_image}"
+  echo
+  echo "config:"
+  render_effective_config
+  echo
+  echo "compose:"
   compose ps
 
   if [[ -n "${GITHUB_REPOSITORY:-}" ]] \
@@ -278,10 +413,74 @@ status() {
   fi
 
   if (( gh_ready )); then
+    echo
+    echo "github:"
     show_github_status
   else
     echo "GitHub status unavailable; run configure and authenticate gh to query the runner." >&2
   fi
+}
+
+yaml_runs_on_list() {
+  local labels=()
+  local label
+  local first=1
+
+  IFS=',' read -r -a labels <<< "${RUNNER_LABELS}"
+  printf '['
+  for label in "${labels[@]}"; do
+    label="$(trim_label "${label}")"
+    [[ -n "${label}" ]] || continue
+    if (( first )); then
+      first=0
+    else
+      printf ', '
+    fi
+    printf '%s' "${label}"
+  done
+  printf ']'
+}
+
+example() {
+  load_env
+  set_defaults
+  require_repo_config
+
+  cat <<EOF
+Worked example for ${GITHUB_REPOSITORY}
+
+1. Install the user-space ujust extension:
+   sudo systemctl enable --now docker.service
+   just install-user
+
+2. Configure the runner:
+   ujust setup-github-runner configure
+
+   Suggested answers:
+   - GitHub repository: ${GITHUB_REPOSITORY}
+   - Runner name: ${RUNNER_NAME}
+   - Runner labels: ${RUNNER_LABELS}
+   - Runner home: ${RUNNER_HOME}
+   - Runner container name: ${RUNNER_CONTAINER_NAME}
+   - Runner image name: ${RUNNER_IMAGE_NAME}
+
+3. Verify prerequisites:
+   ujust setup-github-runner doctor
+
+4. Install and start the runner:
+   ujust setup-github-runner install
+
+5. Check status:
+   ujust setup-github-runner status
+
+6. Point trusted workflow jobs at the runner with:
+
+   runs-on: $(yaml_runs_on_list)
+
+This tool does not edit ${GITHUB_REPOSITORY}'s workflow YAML for you.
+Keep public pull_request jobs on GitHub-hosted runners unless you explicitly
+want untrusted code running on your own machine.
+EOF
 }
 
 logs() {
@@ -302,6 +501,9 @@ main() {
     configure)
       configure
       ;;
+    configure-from-env)
+      configure_from_env
+      ;;
     doctor)
       doctor
       ;;
@@ -316,6 +518,12 @@ main() {
       ;;
     logs)
       logs
+      ;;
+    example)
+      example
+      ;;
+    show-config)
+      show_config
       ;;
     *)
       usage

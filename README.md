@@ -56,11 +56,20 @@ Useful commands:
 - `ujust setup-github-runner doctor`
 - `ujust setup-github-runner status`
 - `ujust setup-github-runner logs`
+- `ujust setup-github-runner example`
+- `ujust setup-github-runner show-config`
 - `ujust setup-github-runner remove`
 
 Configuration is stored in `~/.config/ublue-github-runner/runner.env`.
 Installed assets live under `~/.local/share/ublue-github-runner`.
 Runner state stays under `~/.local/share/github-actions-runner` by default.
+
+If you want to script configuration instead of using prompts, export the desired
+environment variables first and run:
+
+```bash
+ujust setup-github-runner configure-from-env
+```
 
 ## Worked Example
 
@@ -88,6 +97,8 @@ When prompted, enter values like:
 - Runner name: `automatic-parakeet-builder-$(hostname -s)`
 - Runner labels: `self-hosted,linux,x64,automatic-parakeet-builder`
 - Runner home: `/var/home/$USER/.local/share/automatic-parakeet-runner`
+- Runner container name: `github-actions-runner-danathar-automatic-parakeet`
+- Runner image name: `local/github-actions-runner:danathar-automatic-parakeet`
 
 That writes:
 
@@ -96,6 +107,8 @@ GITHUB_REPOSITORY=Danathar/automatic-parakeet
 RUNNER_NAME=automatic-parakeet-builder-yourhost
 RUNNER_LABELS=self-hosted,linux,x64,automatic-parakeet-builder
 RUNNER_HOME=/var/home/youruser/.local/share/automatic-parakeet-runner
+RUNNER_CONTAINER_NAME=github-actions-runner-danathar-automatic-parakeet
+RUNNER_IMAGE_NAME=local/github-actions-runner:danathar-automatic-parakeet
 ```
 
 to `~/.config/ublue-github-runner/runner.env`.
@@ -138,6 +151,12 @@ You should see:
 
 - the local runner container
 - the GitHub runner registration for `automatic-parakeet-builder-yourhost`
+
+If you want the tool to print the workflow label example directly:
+
+```bash
+ujust setup-github-runner example
+```
 
 ### 6. Point trusted workflows at the runner
 
