@@ -75,6 +75,36 @@ environment variables first and run:
 ujust setup-github-runner configure-from-env
 ```
 
+## Runner Labels
+
+`RUNNER_LABELS` is the comma-separated list of labels this tool registers with
+GitHub for the runner. Workflow jobs use those labels in `runs-on` to decide
+which runner is allowed to pick up the job.
+
+For example:
+
+```dotenv
+RUNNER_LABELS=self-hosted,linux,x64,automatic-parakeet-builder
+```
+
+maps to:
+
+```yaml
+runs-on: [self-hosted, linux, x64, automatic-parakeet-builder]
+```
+
+Important details:
+
+- GitHub matches all labels in `runs-on`, not just one of them.
+- `self-hosted`, `linux`, and `x64` are the standard base labels and should
+  usually stay.
+- The last label should usually be a repo-specific label such as
+  `automatic-parakeet-builder` so trusted jobs land on the intended runner and
+  not some other self-hosted machine.
+- Runner names are mostly for humans. Labels are what workflow scheduling
+  actually matches against.
+- Labels are not a security boundary. They only control job placement.
+
 ## Worked Example
 
 Here is a concrete repo-scoped example for
