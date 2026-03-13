@@ -9,6 +9,14 @@ config_dir="${config_home}/ublue-github-runner"
 wrapper_path="${bin_dir}/ujust"
 wrapper_marker="# managed by ublue-github-runner"
 
+# Try to shut down the runner cleanly before deleting the installed files.
+# That avoids leaving an always-restarting container behind with no easy way
+# for the user to remove or unregister it later.
+if [[ -x "${data_dir}/runner" ]]; then
+  echo "Stopping and unregistering any configured runner before uninstalling..."
+  "${data_dir}/runner" remove
+fi
+
 if [[ -f "${wrapper_path}" ]] && grep -qF "${wrapper_marker}" "${wrapper_path}"; then
   rm -f "${wrapper_path}"
 fi

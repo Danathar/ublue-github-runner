@@ -173,9 +173,10 @@ This will:
 
 1. request a fresh repo registration token from GitHub
 2. recreate the runner container so saved config changes are actually applied
-3. build the local runner wrapper image
-4. start the runner container with Docker restart policy `unless-stopped`
-5. register the runner against `Danathar/automatic-parakeet`
+3. pull the latest upstream runner base image
+4. build the local runner wrapper image
+5. start the runner container with Docker restart policy `unless-stopped`
+6. register the runner against `Danathar/automatic-parakeet`
 
 ### 5. Verify runner status
 
@@ -221,6 +222,26 @@ Use `ujust setup-github-runner remove` when you want to remove the runner.
 If you manually delete the container with `docker rm -f` instead, GitHub will
 usually keep the runner registration and show it as offline until you remove it
 through GitHub's UI or run this tool's normal removal flow.
+
+Also, `just uninstall-user` now tries to run the normal removal flow first so
+it does not leave the runner container behind in the background.
+
+## Troubleshooting
+
+### Permission denied while cleaning up runner files
+
+The runner container talks to the host Docker socket as root, so files created
+inside the configured runner directories can end up owned by root on the host.
+
+If you want to remove the runner cleanly, use:
+
+```bash
+ujust setup-github-runner remove
+```
+
+If you are manually cleaning up old runner directories and hit permission
+errors, remove the runner first and then use `sudo rm -rf` on the configured
+runner home directory if needed.
 
 ## What This Tool Does Not Do
 

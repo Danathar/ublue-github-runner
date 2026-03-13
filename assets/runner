@@ -151,7 +151,17 @@ container_running() {
 }
 
 registration_token() {
-  gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runners/registration-token" --jq .token
+  local token
+
+  # Keep the error message human-readable here.
+  # Raw GitHub API JSON is useful for debugging, but it is a poor default
+  # experience for users who only need to know what to fix next.
+  if ! token="$(gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runners/registration-token" --jq .token 2>/dev/null)"; then
+    die "Failed to get a runner registration token for ${GITHUB_REPOSITORY}. Check 'gh auth status' and make sure the authenticated account can manage self-hosted runners for this repository."
+  fi
+
+  [[ -n "${token}" ]] || die "GitHub returned an empty runner registration token for ${GITHUB_REPOSITORY}"
+  printf '%s\n' "${token}"
 }
 
 runner_id() {
@@ -383,7 +393,12 @@ install() {
     compose down
   fi
 
-  compose up --detach --build
+  # Auto-update is disabled inside the runner container, so the easiest
+  # understandable update story is: run install again.
+  # We pull the latest upstream base image, rebuild our thin wrapper image,
+  # and then start the service with the current saved configuration.
+  compose build --pull
+  compose up --detach
   status
 }
 
