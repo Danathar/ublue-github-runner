@@ -1,5 +1,9 @@
 # Repo-Scoped GitHub Runner for Universal Blue Hosts
 
+> [!NOTE]
+> This project was primarily produced with AI assistance, with manual input,
+> review, and correction by the maintainer.
+
 This repo bootstraps a repo-scoped GitHub Actions runner container for immutable
 Fedora-family hosts such as Bluefin, Aurora, and uCore.
 
