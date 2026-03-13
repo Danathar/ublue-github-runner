@@ -24,6 +24,8 @@ install_file() {
   install -D -m "${mode}" "${src}" "${dst}"
 }
 
+# Only replace ~/.local/bin/ujust if this project created it earlier.
+# That keeps us from overwriting a user's own wrapper script by accident.
 ensure_wrapper_target() {
   if [[ -e "${wrapper_path}" ]] && ! grep -qF "${wrapper_marker}" "${wrapper_path}"; then
     die "${wrapper_path} already exists and is not managed by this project"
@@ -44,12 +46,17 @@ cat > "${wrapper_path}" <<EOF
 set -euo pipefail
 ${wrapper_marker}
 
+# The custom justfile lives in the user's config directory so it stays writable
+# on immutable Universal Blue systems.
 justfile="\${XDG_CONFIG_HOME:-\${HOME}/.config}/ublue-github-runner/ujust.just"
 
+# If the custom justfile is missing, fall back to the stock system ujust.
 if [[ ! -f "\${justfile}" ]]; then
   exec /usr/bin/ujust "\$@"
 fi
 
+# Otherwise, run our merged justfile. That file imports the stock Universal Blue
+# recipes first and then adds setup-github-runner.
 exec just --justfile "\${justfile}" "\$@"
 EOF
 chmod 0755 "${wrapper_path}"

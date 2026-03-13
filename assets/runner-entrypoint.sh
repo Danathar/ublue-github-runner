@@ -1,4 +1,5 @@
 #!/usr/bin/dumb-init /bin/bash
+# shellcheck shell=bash
 set -euo pipefail
 
 actions_runner_dir="${ACTIONS_RUNNER_DIR:-/actions-runner}"

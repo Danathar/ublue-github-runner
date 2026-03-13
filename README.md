@@ -67,6 +67,7 @@ Useful commands:
 Configuration is stored in `~/.config/ublue-github-runner/runner.env`.
 Installed assets live under `~/.local/share/ublue-github-runner`.
 Runner state stays under `~/.local/share/github-actions-runner` by default.
+`runner.env` is intentionally a plain `KEY=value` file, not a shell script.
 
 If you want to script configuration instead of using prompts, export the desired
 environment variables first and run:
@@ -171,9 +172,10 @@ ujust setup-github-runner install
 This will:
 
 1. request a fresh repo registration token from GitHub
-2. build the local runner wrapper image
-3. start the runner container with Docker restart policy `unless-stopped`
-4. register the runner against `Danathar/automatic-parakeet`
+2. recreate the runner container so saved config changes are actually applied
+3. build the local runner wrapper image
+4. start the runner container with Docker restart policy `unless-stopped`
+5. register the runner against `Danathar/automatic-parakeet`
 
 ### 5. Verify runner status
 
@@ -211,6 +213,14 @@ want untrusted PR code to run on your own machine.
 Because Docker is enabled at boot and the runner container uses
 `restart: unless-stopped`, the runner should come back automatically whenever
 the host reboots.
+
+### 8. Manual container removal
+
+Use `ujust setup-github-runner remove` when you want to remove the runner.
+
+If you manually delete the container with `docker rm -f` instead, GitHub will
+usually keep the runner registration and show it as offline until you remove it
+through GitHub's UI or run this tool's normal removal flow.
 
 ## What This Tool Does Not Do
 

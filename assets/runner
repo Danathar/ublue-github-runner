@@ -10,10 +10,20 @@ die() {
   exit 1
 }
 
+# Keep the saved config format deliberately simple:
+# each line is just KEY=value with no shell syntax.
+# That makes the file easier to read and safer to parse.
 config_line() {
   local key="$1"
   local value="$2"
-  printf '%s=%q\n' "${key}" "${value}"
+
+  case "${value}" in
+    *$'\n'*|*$'\r'*)
+      die "Config value for ${key} cannot contain newlines"
+      ;;
+  esac
+
+  printf '%s=%s\n' "${key}" "${value}"
 }
 
 repo_slug() {
@@ -31,19 +41,45 @@ trim_label() {
   printf '%s\n' "${value}"
 }
 
+allowed_config_key() {
+  case "${1}" in
+    GITHUB_REPOSITORY|RUNNER_NAME|RUNNER_LABELS|RUNNER_HOME|RUNNER_CONTAINER_NAME|RUNNER_IMAGE_NAME)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+set_config_value() {
+  local key="$1"
+  local value="$2"
+
+  allowed_config_key "${key}" || die "Unsupported key in ${config_file}: ${key}"
+
+  export "${key}=${value}"
+}
+
 load_env() {
   local line
   local key
+  local value
 
   if [[ -f "${config_file}" ]]; then
     while IFS= read -r line; do
       [[ -n "${line}" ]] || continue
       [[ "${line}" == \#* ]] && continue
+      [[ "${line}" == *=* ]] || die "Invalid line in ${config_file}: ${line}"
+
       key="${line%%=*}"
+      value="${line#*=}"
       [[ -n "${key}" ]] || continue
+
       if [[ -z "${!key+x}" ]]; then
-        # Values in runner.env are written with shell quoting via %q.
-        eval "export ${line}"
+        # Only load the handful of keys this tool owns.
+        # The file is treated as data, not as shell code.
+        set_config_value "${key}" "${value}"
       fi
     done < "${config_file}"
   fi
@@ -93,6 +129,10 @@ compose() {
     --file "${share_dir}/compose.yaml" \
     --project-directory "${share_dir}" \
     "$@"
+}
+
+compose_runner_exists() {
+  [[ -n "$(compose ps --all --quiet runner 2>/dev/null)" ]]
 }
 
 ensure_dirs() {
@@ -163,6 +203,8 @@ save_config() {
   mkdir -p "${config_dir}"
   cat > "${config_file}" <<EOF
 # User configuration for the local GitHub Actions runner.
+# This file intentionally uses plain KEY=value lines.
+# It is read by this tool as data, not executed as shell code.
 $(config_line "GITHUB_REPOSITORY" "${GITHUB_REPOSITORY}")
 $(config_line "RUNNER_NAME" "${RUNNER_NAME}")
 $(config_line "RUNNER_LABELS" "${RUNNER_LABELS}")
@@ -328,20 +370,18 @@ install() {
   require_gh
   ensure_dirs
 
-  if container_exists; then
-    if container_running; then
-      echo "Runner container is already running"
-    else
-      docker start "$(container_name)" >/dev/null
-      echo "Started $(container_name)"
-    fi
-
-    status
-    return
-  fi
-
+  # Fetch the token before touching the current container so we do not
+  # tear down a working runner if GitHub auth is broken.
   export RUNNER_TOKEN
   RUNNER_TOKEN="$(registration_token)"
+
+  # Always let Docker Compose reconcile the service.
+  # Recreating the container is the simplest way to apply config changes
+  # such as new labels, names, paths, or image settings.
+  if compose_runner_exists; then
+    echo "Recreating the runner container so configuration changes take effect"
+    compose down
+  fi
 
   compose up --detach --build
   status
